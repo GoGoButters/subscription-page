@@ -16,7 +16,6 @@ interface ICachedWebhookResponse {
 
 const CACHE_TTL_MS = 60_000; // 60 seconds
 const FAIL_CACHE_TTL_MS = 30_000; // 30 seconds — don't retry n8n when it's struggling
-const MAX_CONCURRENT_WEBHOOKS = 3; // max parallel requests to n8n
 
 @Injectable()
 export class WhitelistService {
@@ -26,8 +25,6 @@ export class WhitelistService {
     private readonly pendingRequests = new Map<string, Promise<ICachedWebhookResponse | null>>();
     // Tracks recent failures so we don't hammer n8n when it's down/slow
     private readonly failedCache = new Map<string, number>();
-    // Limits concurrent webhook calls to prevent overwhelming n8n
-    private activeWebhookCount = 0;
 
     constructor(private readonly pgService: PgService) {}
 
@@ -101,20 +98,11 @@ export class WhitelistService {
                 return false;
             }
 
-            // 3. Check concurrency limit — don't overwhelm n8n
-            if (this.activeWebhookCount >= MAX_CONCURRENT_WEBHOOKS) {
-                this.logger.warn(
-                    `Concurrency limit reached (${this.activeWebhookCount}/${MAX_CONCURRENT_WEBHOOKS}), falling back to standard for rmw_uuid=${shortUuid}`,
-                );
-                return false;
-            }
-
-            // 4. First request — fetch from webhook and let others wait
+            // 3. First request — fetch from webhook and let others wait
             this.logger.log(
-                `Whitelist active for rmw_uuid=${shortUuid}, proxying to webhook (${this.activeWebhookCount + 1}/${MAX_CONCURRENT_WEBHOOKS} slots)`,
+                `Whitelist active for rmw_uuid=${shortUuid}, proxying to webhook`,
             );
 
-            this.activeWebhookCount++;
             const webhookPromise = this.fetchFromWebhook(
                 clientIp,
                 shortUuid,
@@ -131,7 +119,6 @@ export class WhitelistService {
                 }
                 return false;
             } finally {
-                this.activeWebhookCount--;
                 this.pendingRequests.delete(shortUuid);
             }
         } catch (error) {
