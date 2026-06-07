@@ -81,7 +81,9 @@ export class PgService implements OnModuleInit, OnModuleDestroy {
                 unlimited_expiry_date: Date | null;
                 whitelist_subscription: string | null;
             }>(
-                'SELECT unlimited_expiry_date, whitelist_subscription FROM vpn_users WHERE rmw_uuid = $1 LIMIT 1',
+                `SELECT unlimited_expiry_date, whitelist_subscription FROM vpn_users
+                 WHERE rmw_uuid = $1 OR sub LIKE '%/' || $1
+                 LIMIT 1`,
                 [rmwUuid],
             );
 
