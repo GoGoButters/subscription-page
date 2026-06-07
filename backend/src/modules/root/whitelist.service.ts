@@ -97,33 +97,32 @@ export class WhitelistService {
         res: Response,
     ): Promise<boolean> {
         try {
-            // Build headers to forward to the webhook
-            // Pass through client headers that are relevant for the webhook
+            // Forward ALL client headers to the webhook transparently,
+            // excluding only hop-by-hop and internal headers.
+            // This ensures any VPN client's custom headers (x-device-os, x-hwid, etc.) reach the webhook.
+            const excludedHeaders = new Set([
+                'host',
+                'connection',
+                'authorization',
+                'content-length',
+                'transfer-encoding',
+                'keep-alive',
+                'upgrade',
+                'trailer',
+                'te',
+                'proxy-authorization',
+                'proxy-authenticate',
+            ]);
+
             const forwardHeaders: Record<string, string> = {};
 
-            const headersToForward = [
-                'user-agent',
-                'accept',
-                'accept-language',
-                'accept-encoding',
-                'if-none-match',
-                'x-device-os',
-                'x-hwid',
-                'x-device-locale',
-                'x-ver-os',
-                'x-app-version',
-                'x-device-model',
-                'priority',
-            ];
-
-            for (const headerName of headersToForward) {
-                const value = req.headers[headerName];
-                if (value) {
-                    forwardHeaders[headerName] = Array.isArray(value) ? value.join(', ') : value;
+            for (const [key, value] of Object.entries(req.headers)) {
+                if (value && !excludedHeaders.has(key.toLowerCase())) {
+                    forwardHeaders[key] = Array.isArray(value) ? value.join(', ') : value;
                 }
             }
 
-            // Pass the real client IP so the webhook sees the actual user IP
+            // Override IP headers so the webhook sees the real client IP
             forwardHeaders['x-real-ip'] = clientIp;
             forwardHeaders['x-forwarded-for'] = clientIp;
             forwardHeaders['x-forwarded-proto'] = 'https';
