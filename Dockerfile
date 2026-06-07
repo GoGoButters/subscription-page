@@ -2,7 +2,7 @@ FROM node:24.14-trixie-slim AS frontend-build
 WORKDIR /opt/app/frontend
 
 COPY frontend/package*.json ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 
 COPY frontend/ .
 RUN npm run start:build
