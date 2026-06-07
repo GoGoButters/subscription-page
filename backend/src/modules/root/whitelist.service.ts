@@ -20,6 +20,8 @@ const CACHE_TTL_MS = 60_000; // 60 seconds
 export class WhitelistService {
     private readonly logger = new Logger(WhitelistService.name);
     private readonly webhookCache = new Map<string, ICachedWebhookResponse>();
+    // Tracks in-flight webhook requests so concurrent requests wait for the same response
+    private readonly pendingRequests = new Map<string, Promise<ICachedWebhookResponse | null>>();
 
     constructor(private readonly pgService: PgService) {}
 
@@ -60,7 +62,7 @@ export class WhitelistService {
                 return false;
             }
 
-            // Check cache first
+            // 1. Check cache — serve instantly if fresh
             const cached = this.webhookCache.get(shortUuid);
             if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
                 this.logger.debug(
@@ -70,18 +72,43 @@ export class WhitelistService {
                 return true;
             }
 
-            // unlimited_expiry_date is in the future — proxy to whitelist webhook
+            // 2. Check if another request is already fetching from webhook — wait for it
+            const pending = this.pendingRequests.get(shortUuid);
+            if (pending) {
+                this.logger.debug(
+                    `Waiting for in-flight webhook request for rmw_uuid=${shortUuid}`,
+                );
+                const result = await pending;
+                if (result) {
+                    this.sendCachedResponse(result, res);
+                    return true;
+                }
+                return false;
+            }
+
+            // 3. First request — fetch from webhook and let others wait
             this.logger.log(
                 `Whitelist active for rmw_uuid=${shortUuid}, proxying to webhook`,
             );
 
-            return await this.proxyToWebhook(
+            const webhookPromise = this.fetchFromWebhook(
                 clientIp,
                 shortUuid,
                 vpnUser.whitelistSubscription,
                 req,
-                res,
             );
+            this.pendingRequests.set(shortUuid, webhookPromise);
+
+            try {
+                const result = await webhookPromise;
+                if (result) {
+                    this.sendCachedResponse(result, res);
+                    return true;
+                }
+                return false;
+            } finally {
+                this.pendingRequests.delete(shortUuid);
+            }
         } catch (error) {
             this.logger.error(`Error in tryServeWhitelist for rmw_uuid=${shortUuid}: ${error}`);
             return false;
@@ -118,17 +145,17 @@ export class WhitelistService {
         res.status(cached.status).send(cached.data);
     }
 
-    private async proxyToWebhook(
+    /**
+     * Fetches the webhook response, caches it, and returns the cached object.
+     * Does NOT send the response to `res` — the caller does that.
+     */
+    private async fetchFromWebhook(
         clientIp: string,
         shortUuid: string,
         webhookUrl: string,
         req: Request,
-        res: Response,
-    ): Promise<boolean> {
+    ): Promise<ICachedWebhookResponse | null> {
         try {
-            // Forward ALL client headers to the webhook transparently,
-            // excluding only hop-by-hop and internal headers.
-            // This ensures any VPN client's custom headers (x-device-os, x-hwid, etc.) reach the webhook.
             const excludedHeaders = new Set([
                 'host',
                 'connection',
@@ -151,7 +178,6 @@ export class WhitelistService {
                 }
             }
 
-            // Override IP headers so the webhook sees the real client IP
             forwardHeaders['x-real-ip'] = clientIp;
             forwardHeaders['x-forwarded-for'] = clientIp;
             forwardHeaders['x-forwarded-proto'] = 'https';
@@ -163,12 +189,10 @@ export class WhitelistService {
             const webhookResponse = await axios.get(webhookUrl, {
                 headers: forwardHeaders,
                 timeout: 15_000,
-                // Return raw response data as string (subscription configs)
                 transformResponse: [(data: unknown) => data],
                 validateStatus: () => true,
             });
 
-            // Collect response headers to forward (and cache)
             const responseHeaders: Record<string, string> = {};
             if (webhookResponse.headers) {
                 Object.entries(webhookResponse.headers)
@@ -180,24 +204,20 @@ export class WhitelistService {
                     });
             }
 
-            // Cache the response
-            this.webhookCache.set(shortUuid, {
+            const cachedResponse: ICachedWebhookResponse = {
                 status: webhookResponse.status,
                 headers: responseHeaders,
                 data: webhookResponse.data,
                 cachedAt: Date.now(),
-            });
+            };
 
-            // Send response to client
-            Object.entries(responseHeaders).forEach(([key, value]) => {
-                res.setHeader(key, value);
-            });
+            // Store in cache
+            this.webhookCache.set(shortUuid, cachedResponse);
 
-            res.status(webhookResponse.status).send(webhookResponse.data);
-            return true;
+            return cachedResponse;
         } catch (error) {
             this.logger.error(`Error proxying to webhook ${webhookUrl}: ${error}`);
-            return false;
+            return null;
         }
     }
 }
