@@ -7,9 +7,19 @@ import axios from 'axios';
 import { PgService } from '@common/pg/pg.service';
 import { IGNORED_HEADERS } from '@common/constants/index';
 
+interface ICachedWebhookResponse {
+    status: number;
+    headers: Record<string, string>;
+    data: unknown;
+    cachedAt: number;
+}
+
+const CACHE_TTL_MS = 60_000; // 60 seconds
+
 @Injectable()
 export class WhitelistService {
     private readonly logger = new Logger(WhitelistService.name);
+    private readonly webhookCache = new Map<string, ICachedWebhookResponse>();
 
     constructor(private readonly pgService: PgService) {}
 
@@ -50,6 +60,16 @@ export class WhitelistService {
                 return false;
             }
 
+            // Check cache first
+            const cached = this.webhookCache.get(shortUuid);
+            if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
+                this.logger.debug(
+                    `Serving cached whitelist response for rmw_uuid=${shortUuid} (age: ${Math.round((Date.now() - cached.cachedAt) / 1000)}s)`,
+                );
+                this.sendCachedResponse(cached, res);
+                return true;
+            }
+
             // unlimited_expiry_date is in the future — proxy to whitelist webhook
             this.logger.log(
                 `Whitelist active for rmw_uuid=${shortUuid}, proxying to webhook`,
@@ -57,6 +77,7 @@ export class WhitelistService {
 
             return await this.proxyToWebhook(
                 clientIp,
+                shortUuid,
                 vpnUser.whitelistSubscription,
                 req,
                 res,
@@ -90,8 +111,16 @@ export class WhitelistService {
         }
     }
 
+    private sendCachedResponse(cached: ICachedWebhookResponse, res: Response): void {
+        Object.entries(cached.headers).forEach(([key, value]) => {
+            res.setHeader(key, value);
+        });
+        res.status(cached.status).send(cached.data);
+    }
+
     private async proxyToWebhook(
         clientIp: string,
+        shortUuid: string,
         webhookUrl: string,
         req: Request,
         res: Response,
@@ -139,16 +168,30 @@ export class WhitelistService {
                 validateStatus: () => true,
             });
 
-            // Forward response headers from webhook to the client
+            // Collect response headers to forward (and cache)
+            const responseHeaders: Record<string, string> = {};
             if (webhookResponse.headers) {
                 Object.entries(webhookResponse.headers)
                     .filter(([key]) => !IGNORED_HEADERS.has(key.toLowerCase()))
                     .forEach(([key, value]) => {
                         if (value !== undefined) {
-                            res.setHeader(key, value as string);
+                            responseHeaders[key] = value as string;
                         }
                     });
             }
+
+            // Cache the response
+            this.webhookCache.set(shortUuid, {
+                status: webhookResponse.status,
+                headers: responseHeaders,
+                data: webhookResponse.data,
+                cachedAt: Date.now(),
+            });
+
+            // Send response to client
+            Object.entries(responseHeaders).forEach(([key, value]) => {
+                res.setHeader(key, value);
+            });
 
             res.status(webhookResponse.status).send(webhookResponse.data);
             return true;
