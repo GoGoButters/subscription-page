@@ -42,6 +42,14 @@ export class WhitelistService {
             return false;
         }
 
+        // 0. Bypass whitelist if requested explicitly (e.g. by n8n fetching base config) to prevent deadlocks
+        if (req.query.nowhitelist === '1' || req.headers['x-nowhitelist'] === '1') {
+            this.logger.debug(
+                `Bypassing whitelist for rmw_uuid=${shortUuid} due to nowhitelist flag`,
+            );
+            return false;
+        }
+
         try {
             const vpnUser = await this.pgService.findUserByRmwUuid(shortUuid);
 
