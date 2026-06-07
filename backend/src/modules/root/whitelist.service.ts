@@ -15,6 +15,7 @@ interface ICachedWebhookResponse {
 }
 
 const CACHE_TTL_MS = 60_000; // 60 seconds
+const FAIL_CACHE_TTL_MS = 30_000; // 30 seconds — don't retry n8n when it's struggling
 
 @Injectable()
 export class WhitelistService {
@@ -22,6 +23,8 @@ export class WhitelistService {
     private readonly webhookCache = new Map<string, ICachedWebhookResponse>();
     // Tracks in-flight webhook requests so concurrent requests wait for the same response
     private readonly pendingRequests = new Map<string, Promise<ICachedWebhookResponse | null>>();
+    // Tracks recent failures so we don't hammer n8n when it's down/slow
+    private readonly failedCache = new Map<string, number>();
 
     constructor(private readonly pgService: PgService) {}
 
@@ -70,6 +73,15 @@ export class WhitelistService {
                 );
                 this.sendCachedResponse(cached, res);
                 return true;
+            }
+
+            // 1b. Check if webhook recently failed — fall back to standard Remnawave
+            const failedAt = this.failedCache.get(shortUuid);
+            if (failedAt && Date.now() - failedAt < FAIL_CACHE_TTL_MS) {
+                this.logger.debug(
+                    `Skipping webhook for rmw_uuid=${shortUuid} — recent failure (${Math.round((Date.now() - failedAt) / 1000)}s ago)`,
+                );
+                return false;
             }
 
             // 2. Check if another request is already fetching from webhook — wait for it
@@ -188,7 +200,7 @@ export class WhitelistService {
 
             const webhookResponse = await axios.get(webhookUrl, {
                 headers: forwardHeaders,
-                timeout: 15_000,
+                timeout: 30_000,
                 transformResponse: [(data: unknown) => data],
                 validateStatus: () => true,
             });
@@ -217,6 +229,8 @@ export class WhitelistService {
             return cachedResponse;
         } catch (error) {
             this.logger.error(`Error proxying to webhook ${webhookUrl}: ${error}`);
+            // Cache the failure so we don't retry for 30 seconds
+            this.failedCache.set(shortUuid, Date.now());
             return null;
         }
     }
