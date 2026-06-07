@@ -4,8 +4,8 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import axios from 'axios';
 
-import { PgService } from '@common/pg/pg.service.js';
-import { IGNORED_HEADERS } from '@common/constants/index.js';
+import { PgService } from '@common/pg/pg.service';
+import { IGNORED_HEADERS } from '@common/constants/index';
 
 @Injectable()
 export class WhitelistService {
